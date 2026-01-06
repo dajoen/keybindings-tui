@@ -18,7 +18,8 @@ import (
 // Keybinding represents a single keyboard shortcut
 type Keybinding struct {
 	Shortcut string
-	Action   string
+	Action   string // underlying command/target
+	Desc     string // human-friendly description
 	Category string
 	App      string
 }
@@ -34,9 +35,9 @@ func (a appItem) Description() string { return fmt.Sprintf("%d", a.Count) }
 func (a appItem) FilterValue() string { return a.Name }
 
 // Item implements list.Item interface
-func (k Keybinding) FilterValue() string { return k.Shortcut + " " + k.Action }
+func (k Keybinding) FilterValue() string { return k.Shortcut + " " + k.Desc + " " + k.Action }
 func (k Keybinding) Title() string       { return k.Shortcut }
-func (k Keybinding) Description() string { return k.Action }
+func (k Keybinding) Description() string { return k.Desc }
 
 // Model represents the application state
 type model struct {
@@ -69,6 +70,16 @@ var (
 	shortcutStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("#F1FA8C"))
+
+	descStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#A6E3A1"))
+
+	cmdStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#8BE9FD"))
+
+	rowBoxStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			Padding(0, 1)
 
 	docStyle = lipgloss.NewStyle().Margin(1, 2)
 )
@@ -184,9 +195,7 @@ func main() {
 
 	// Main list
 	items := toListItems(keybindings)
-	mainDelegate := list.NewDefaultDelegate()
-	mainDelegate.Styles.SelectedTitle = shortcutStyle
-	mainDelegate.Styles.SelectedDesc = lipgloss.NewStyle().Foreground(lipgloss.Color("#BD93F9"))
+	mainDelegate := newRowDelegate()
 	mainList := list.New(items, mainDelegate, 0, 0)
 	mainList.Title = "Keybindings"
 	mainList.SetShowStatusBar(true)
@@ -239,12 +248,13 @@ func parseHyprland(configPath string) []Keybinding {
 		key := strings.TrimSpace(matches[2])
 		action := strings.TrimSpace(matches[3])
 
+		rawAction := action
 		// Clean up exec prefix
-		if strings.HasPrefix(action, "exec, ") {
-			action = action[6:]
+		if strings.HasPrefix(rawAction, "exec, ") {
+			rawAction = strings.TrimSpace(rawAction[6:])
 		}
 
-		action = humanizeAction(action)
+		desc := humanizeAction(rawAction)
 
 		// Format shortcut
 		shortcut := key
@@ -256,7 +266,8 @@ func parseHyprland(configPath string) []Keybinding {
 
 		bindings = append(bindings, Keybinding{
 			Shortcut: shortcut,
-			Action:   action,
+			Action:   rawAction,
+			Desc:     desc,
 			Category: category,
 			App:      "Hyprland",
 		})
@@ -301,6 +312,7 @@ func parseKitty(configPath string) []Keybinding {
 
 		keyCombo := matches[1]
 		action := strings.TrimSpace(matches[2])
+		desc := humanizeAction(action)
 
 		// Replace kitty_mod
 		if strings.Contains(keyCombo, "kitty_mod") {
@@ -328,6 +340,7 @@ func parseKitty(configPath string) []Keybinding {
 		bindings = append(bindings, Keybinding{
 			Shortcut: shortcut,
 			Action:   action,
+			Desc:     desc,
 			Category: "Terminal",
 			App:      "Kitty",
 		})
@@ -376,9 +389,11 @@ func parseNeovim(configPath string) []Keybinding {
 			action = strings.ReplaceAll(action, "<CR>", "")
 			action = strings.TrimSpace(action)
 
+			desc := humanizeAction(action)
 			bindings = append(bindings, Keybinding{
 				Shortcut: fmt.Sprintf("%s (%s)", key, mode),
 				Action:   action,
+				Desc:     desc,
 				Category: "Editor",
 				App:      "Neovim",
 			})
@@ -408,9 +423,11 @@ func parseNeovim(configPath string) []Keybinding {
 			action = strings.ReplaceAll(action, "<CR>", "")
 			action = strings.TrimSpace(action)
 
+			desc := humanizeAction(action)
 			bindings = append(bindings, Keybinding{
 				Shortcut: fmt.Sprintf("%s (%s)", key, mode),
 				Action:   action,
+				Desc:     desc,
 				Category: "Editor",
 				App:      "Neovim",
 			})
@@ -517,6 +534,55 @@ func contains(slice []string, item string) bool {
 		}
 	}
 	return false
+}
+
+// Custom main list delegate rendering as bordered row with columns
+type rowDelegate struct{}
+
+func newRowDelegate() list.ItemDelegate {
+	return rowDelegate{}
+}
+
+func (d rowDelegate) Height() int                               { return 3 }
+func (d rowDelegate) Spacing() int                              { return 0 }
+func (d rowDelegate) Update(msg tea.Msg, m *list.Model) tea.Cmd { return nil }
+
+func (d rowDelegate) Render(w io.Writer, m list.Model, index int, listItem list.Item) {
+	kb, ok := listItem.(Keybinding)
+	if !ok {
+		return
+	}
+
+	width := m.Width()
+	if width <= 0 {
+		width = 80
+	}
+
+	colShortcut := 18
+	colDesc := width - colShortcut - 18
+	if colDesc < 24 {
+		colDesc = 24
+	}
+	colCmd := width - colShortcut - colDesc - 6
+	if colCmd < 12 {
+		colCmd = 12
+	}
+
+	sep := lipgloss.NewStyle().Foreground(lipgloss.Color("#44475A")).Render(" │ ")
+
+	shortcutCell := lipgloss.NewStyle().Width(colShortcut).Render(shortcutStyle.Render(kb.Shortcut))
+	descCell := lipgloss.NewStyle().Width(colDesc).Render(descStyle.Render(kb.Desc))
+	cmdCell := lipgloss.NewStyle().Width(colCmd).Render(cmdStyle.Render(kb.Action))
+
+	row := lipgloss.JoinHorizontal(lipgloss.Top, shortcutCell, sep, descCell, sep, cmdCell)
+
+	box := rowBoxStyle
+	if index == m.Index() {
+		box = box.BorderForeground(lipgloss.Color("#BD93F9"))
+		row = lipgloss.NewStyle().Bold(true).Render(row)
+	}
+
+	fmt.Fprint(w, box.Width(width).Render(row))
 }
 
 // Helpers for UI data
