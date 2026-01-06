@@ -577,15 +577,16 @@ func TestFilterValueAndDelegates(t *testing.T) {
 }
 
 func TestModelUpdateAndView(t *testing.T) {
-	sidebar := list.New([]list.Item{
+	selector := list.New([]list.Item{
 		appItem{Name: "All", Count: 2},
 		appItem{Name: "Kitty", Count: 1},
 	}, list.NewDefaultDelegate(), 0, 0)
 	mainList := list.New([]list.Item{Keybinding{Shortcut: "S", Desc: "D"}}, list.NewDefaultDelegate(), 0, 0)
 	m := model{
-		sidebar:     sidebar,
+		selector:    selector,
 		main:        mainList,
 		keybindings: []Keybinding{{App: "Kitty"}, {App: "Hyprland"}},
+		screen:      screenSelect,
 	}
 
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
@@ -594,29 +595,31 @@ func TestModelUpdateAndView(t *testing.T) {
 		t.Fatalf("unexpected size: %d x %d", m2.width, m2.height)
 	}
 
-	updated, _ = m2.Update(tea.KeyMsg{Type: tea.KeyTab})
+	updated, _ = m2.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m3 := updated.(model)
-	if !m3.focusSidebar {
-		t.Fatalf("expected focusSidebar true")
+	if m3.screen != screenBrowse {
+		t.Fatalf("expected browse screen")
 	}
 
 	updated, _ = m3.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m4 := updated.(model)
-	if m4.selectedApp != "Kitty" {
-		t.Fatalf("unexpected selected app: %q", m4.selectedApp)
-	}
-
 	view := m3.View()
 	if !strings.Contains(view, "Keyboard Shortcuts") {
 		t.Fatalf("unexpected view: %q", view)
 	}
 
-	updated, _ = m4.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	updated, _ = m4.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
 	m5 := updated.(model)
-	if !m5.quitting {
+	if m5.screen != screenSelect {
+		t.Fatalf("expected select screen")
+	}
+
+	updated, _ = m5.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	m6 := updated.(model)
+	if !m6.quitting {
 		t.Fatalf("expected quitting")
 	}
-	if m5.View() != "" {
+	if m6.View() != "" {
 		t.Fatalf("expected empty view when quitting")
 	}
 }
@@ -682,17 +685,17 @@ func TestModelInitAndMainUpdatePath(t *testing.T) {
 		t.Fatalf("expected nil init")
 	}
 
-	sidebar := list.New([]list.Item{}, list.NewDefaultDelegate(), 10, 5)
+	selector := list.New([]list.Item{}, list.NewDefaultDelegate(), 10, 5)
 	mainList := list.New([]list.Item{Keybinding{Shortcut: "S", Desc: "D"}}, list.NewDefaultDelegate(), 10, 5)
 	m = model{
-		sidebar:      sidebar,
-		main:         mainList,
-		focusSidebar: false,
+		selector: selector,
+		main:     mainList,
+		screen:   screenBrowse,
 	}
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m2 := updated.(model)
-	if m2.focusSidebar {
-		t.Fatalf("expected main list focus")
+	if m2.screen != screenBrowse {
+		t.Fatalf("expected browse screen")
 	}
 }
 

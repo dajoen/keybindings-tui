@@ -44,17 +44,24 @@ func (k Keybinding) Description() string { return k.Desc }
 
 // Model represents the application state
 type model struct {
-	sidebar      list.Model
+	selector     list.Model
 	main         list.Model
 	keybindings  []Keybinding
 	filteredKeys []Keybinding
 	apps         []string
 	selectedApp  string
-	focusSidebar bool
+	screen       screen
 	width        int
 	height       int
 	quitting     bool
 }
+
+type screen int
+
+const (
+	screenSelect screen = iota
+	screenBrowse
+)
 
 // Styles
 var (
@@ -85,12 +92,21 @@ var (
 			Padding(0, 1)
 
 	docStyle = lipgloss.NewStyle().Margin(1, 2)
+
+	selectorBoxStyle = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				Padding(1, 2)
+
+	footerStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#6C7086"))
 )
 
 // keyMap defines keybindings for the TUI
 type keyMap struct {
-	Quit  key.Binding
-	Focus key.Binding
+	Quit      key.Binding
+	Select    key.Binding
+	Back      key.Binding
+	ChangeApp key.Binding
 }
 
 var keys = keyMap{
@@ -98,9 +114,17 @@ var keys = keyMap{
 		key.WithKeys("q", "ctrl+c"),
 		key.WithHelp("q", "quit"),
 	),
-	Focus: key.NewBinding(
-		key.WithKeys("tab", "shift+tab"),
-		key.WithHelp("tab", "toggle focus"),
+	Select: key.NewBinding(
+		key.WithKeys("enter"),
+		key.WithHelp("enter", "select"),
+	),
+	Back: key.NewBinding(
+		key.WithKeys("esc"),
+		key.WithHelp("esc", "back"),
+	),
+	ChangeApp: key.NewBinding(
+		key.WithKeys("a"),
+		key.WithHelp("a", "apps"),
 	),
 }
 
@@ -113,30 +137,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		sidebarWidth := 24
-		if msg.Width < 70 {
-			sidebarWidth = 18
-		} else if msg.Width > 110 {
-			sidebarWidth = 28
-		}
-		contentWidth := msg.Width - sidebarWidth - 4
-		if contentWidth < 24 {
-			// squeeze sidebar if terminal is very narrow
-			sidebarWidth = 14
-			contentWidth = msg.Width - sidebarWidth - 4
-			if contentWidth < 20 {
-				contentWidth = 20
-			}
-		}
-
-		listHeight := msg.Height - 4
+		listHeight := msg.Height - 6
 		if listHeight < 5 {
 			listHeight = 5
 		}
 
-		m.sidebar.SetWidth(sidebarWidth)
-		m.sidebar.SetHeight(listHeight)
-		m.main.SetWidth(contentWidth)
+		mainWidth := msg.Width - 4
+		if mainWidth < 20 {
+			mainWidth = 20
+		}
+		selectorWidth := mainWidth
+		if selectorWidth > 50 {
+			selectorWidth = 50
+		}
+		m.selector.SetWidth(selectorWidth)
+		m.selector.SetHeight(listHeight)
+		m.main.SetWidth(mainWidth)
 		m.main.SetHeight(listHeight)
 		return m, nil
 
@@ -145,21 +161,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keys.Quit):
 			m.quitting = true
 			return m, tea.Quit
-		case key.Matches(msg, keys.Focus):
-			m.focusSidebar = !m.focusSidebar
-			if m.focusSidebar {
-				m.sidebar.Select(0)
+		case key.Matches(msg, keys.Select) && m.screen == screenSelect:
+			if sel, ok := m.selector.SelectedItem().(appItem); ok {
+				m.selectedApp = sel.Name
+				m.applyFilter()
+				m.screen = screenBrowse
 			}
+		case key.Matches(msg, keys.Back) && m.screen == screenBrowse:
+			m.screen = screenSelect
+		case key.Matches(msg, keys.ChangeApp) && m.screen == screenBrowse:
+			m.screen = screenSelect
 		}
 	}
 
 	var cmd tea.Cmd
-	if m.focusSidebar {
-		m.sidebar, cmd = m.sidebar.Update(msg)
-		if sel, ok := m.sidebar.SelectedItem().(appItem); ok && sel.Name != m.selectedApp {
-			m.selectedApp = sel.Name
-			m.applyFilter()
-		}
+	if m.screen == screenSelect {
+		m.selector, cmd = m.selector.Update(msg)
 	} else {
 		m.main, cmd = m.main.Update(msg)
 	}
@@ -172,15 +189,16 @@ func (m model) View() string {
 	}
 
 	title := titleStyle.Render("⌨️  Keyboard Shortcuts")
-	sidebar := m.sidebar.View()
+	if m.screen == screenSelect {
+		selector := selectorBoxStyle.Width(m.selector.Width()).Render(m.selector.View())
+		selector = lipgloss.Place(m.width-4, m.height-6, lipgloss.Center, lipgloss.Center, selector)
+		footer := footerStyle.Render("enter: select • q: quit")
+		return docStyle.Render(title + "\n\n" + selector + "\n" + footer)
+	}
+
 	content := m.main.View()
-
-	layout := lipgloss.JoinHorizontal(lipgloss.Top,
-		lipgloss.NewStyle().Width(m.sidebar.Width()+2).Render(sidebar),
-		lipgloss.NewStyle().PaddingLeft(2).Render(content),
-	)
-
-	return docStyle.Render(title + "\n\n" + layout)
+	footer := footerStyle.Render("a/esc: apps • /: filter • q: quit")
+	return docStyle.Render(title + "\n\n" + content + "\n" + footer)
 }
 
 func main() {
@@ -211,14 +229,15 @@ func main() {
 
 	apps, sidebarItems := buildSidebar(keybindings)
 
-	// Sidebar list
+	// Selector list
 	sideDelegate := list.NewDefaultDelegate()
 	sideDelegate.ShowDescription = true
 	sideDelegate.SetSpacing(0)
-	sidebar := list.New(sidebarItems, sideDelegate, 0, 0)
-	sidebar.Title = "Apps"
-	sidebar.SetShowStatusBar(false)
-	sidebar.DisableQuitKeybindings()
+	selector := list.New(sidebarItems, sideDelegate, 0, 0)
+	selector.Title = "Select App"
+	selector.SetShowStatusBar(false)
+	selector.SetFilteringEnabled(false)
+	selector.DisableQuitKeybindings()
 
 	// Main list
 	items := toListItems(keybindings)
@@ -231,13 +250,13 @@ func main() {
 	mainList.DisableQuitKeybindings()
 
 	m := model{
-		sidebar:      sidebar,
+		selector:     selector,
 		main:         mainList,
 		keybindings:  keybindings,
 		filteredKeys: keybindings,
 		apps:         apps,
 		selectedApp:  "All",
-		focusSidebar: true,
+		screen:       screenSelect,
 	}
 	m.applyFilter()
 
