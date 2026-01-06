@@ -7,7 +7,7 @@ A beautiful terminal user interface for viewing all your keyboard shortcuts acro
 ## Features
 
 - 🎨 Beautiful TUI built with [Charm](https://charm.sh)
-- ⌨️ Parses keybindings from multiple applications:
+- ⌨️ Parses keybindings from multiple applications with sidebar selection:
   - **Hyprland** (Window Manager)
   - **Kitty** (Terminal)
   - **Neovim** (Editor)

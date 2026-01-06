@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -22,6 +23,16 @@ type Keybinding struct {
 	App      string
 }
 
+// Sidebar item representing an application bucket
+type appItem struct {
+	Name  string
+	Count int
+}
+
+func (a appItem) Title() string       { return a.Name }
+func (a appItem) Description() string { return fmt.Sprintf("%d", a.Count) }
+func (a appItem) FilterValue() string { return a.Name }
+
 // Item implements list.Item interface
 func (k Keybinding) FilterValue() string { return k.Shortcut + " " + k.Action }
 func (k Keybinding) Title() string       { return k.Shortcut }
@@ -29,9 +40,13 @@ func (k Keybinding) Description() string { return k.Action }
 
 // Model represents the application state
 type model struct {
-	list         list.Model
+	sidebar      list.Model
+	main         list.Model
 	keybindings  []Keybinding
 	filteredKeys []Keybinding
+	apps         []string
+	selectedApp  string
+	focusSidebar bool
 	width        int
 	height       int
 	quitting     bool
@@ -60,13 +75,18 @@ var (
 
 // keyMap defines keybindings for the TUI
 type keyMap struct {
-	Quit key.Binding
+	Quit  key.Binding
+	Focus key.Binding
 }
 
 var keys = keyMap{
 	Quit: key.NewBinding(
 		key.WithKeys("q", "ctrl+c"),
 		key.WithHelp("q", "quit"),
+	),
+	Focus: key.NewBinding(
+		key.WithKeys("tab", "shift+tab"),
+		key.WithHelp("tab", "toggle focus"),
 	),
 }
 
@@ -79,8 +99,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.list.SetWidth(msg.Width)
-		m.list.SetHeight(msg.Height - 4)
+		sidebarWidth := 26
+		contentWidth := msg.Width - sidebarWidth - 4
+		if contentWidth < 30 {
+			contentWidth = 30
+		}
+		m.sidebar.SetWidth(sidebarWidth)
+		m.sidebar.SetHeight(msg.Height - 4)
+		m.main.SetWidth(contentWidth)
+		m.main.SetHeight(msg.Height - 4)
 		return m, nil
 
 	case tea.KeyMsg:
@@ -88,11 +115,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keys.Quit):
 			m.quitting = true
 			return m, tea.Quit
+		case key.Matches(msg, keys.Focus):
+			m.focusSidebar = !m.focusSidebar
+			if m.focusSidebar {
+				m.sidebar.Select(0)
+			}
 		}
 	}
 
 	var cmd tea.Cmd
-	m.list, cmd = m.list.Update(msg)
+	if m.focusSidebar {
+		m.sidebar, cmd = m.sidebar.Update(msg)
+		if sel, ok := m.sidebar.SelectedItem().(appItem); ok && sel.Name != m.selectedApp {
+			m.selectedApp = sel.Name
+			m.applyFilter()
+		}
+	} else {
+		m.main, cmd = m.main.Update(msg)
+	}
 	return m, cmd
 }
 
@@ -102,7 +142,15 @@ func (m model) View() string {
 	}
 
 	title := titleStyle.Render("⌨️  Keyboard Shortcuts")
-	return docStyle.Render(title + "\n\n" + m.list.View())
+	sidebar := m.sidebar.View()
+	content := m.main.View()
+
+	layout := lipgloss.JoinHorizontal(lipgloss.Top,
+		lipgloss.NewStyle().Width(m.sidebar.Width()+2).Render(sidebar),
+		lipgloss.NewStyle().PaddingLeft(2).Render(content),
+	)
+
+	return docStyle.Render(title + "\n\n" + layout)
 }
 
 func main() {
@@ -123,28 +171,39 @@ func main() {
 	nvimKeys := parseNeovim(filepath.Join(homeDir, ".config/nvim/init.lua"))
 	keybindings = append(keybindings, nvimKeys...)
 
-	// Convert to list items
-	items := make([]list.Item, len(keybindings))
-	for i, kb := range keybindings {
-		items[i] = kb
-	}
+	apps, sidebarItems := buildSidebar(keybindings)
 
-	// Create delegate for custom rendering
-	delegate := list.NewDefaultDelegate()
-	delegate.Styles.SelectedTitle = shortcutStyle
-	delegate.Styles.SelectedDesc = lipgloss.NewStyle().Foreground(lipgloss.Color("#BD93F9"))
+	// Sidebar list
+	sideDelegate := list.NewDefaultDelegate()
+	sideDelegate.ShowDescription = true
+	sideDelegate.SetSpacing(0)
+	sidebar := list.New(sidebarItems, sideDelegate, 0, 0)
+	sidebar.Title = "Apps"
+	sidebar.SetShowStatusBar(false)
+	sidebar.DisableQuitKeybindings()
 
-	// Create list
-	l := list.New(items, delegate, 0, 0)
-	l.Title = "Keybindings"
-	l.SetShowStatusBar(true)
-	l.SetFilteringEnabled(true)
-	l.Styles.Title = titleStyle
+	// Main list
+	items := toListItems(keybindings)
+	mainDelegate := list.NewDefaultDelegate()
+	mainDelegate.Styles.SelectedTitle = shortcutStyle
+	mainDelegate.Styles.SelectedDesc = lipgloss.NewStyle().Foreground(lipgloss.Color("#BD93F9"))
+	mainList := list.New(items, mainDelegate, 0, 0)
+	mainList.Title = "Keybindings"
+	mainList.SetShowStatusBar(true)
+	mainList.SetFilteringEnabled(true)
+	mainList.Styles.Title = titleStyle
+	mainList.DisableQuitKeybindings()
 
 	m := model{
-		list:        l,
-		keybindings: keybindings,
+		sidebar:      sidebar,
+		main:         mainList,
+		keybindings:  keybindings,
+		filteredKeys: keybindings,
+		apps:         apps,
+		selectedApp:  "All",
+		focusSidebar: true,
 	}
+	m.applyFilter()
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
@@ -458,6 +517,68 @@ func contains(slice []string, item string) bool {
 		}
 	}
 	return false
+}
+
+// Helpers for UI data
+
+func buildSidebar(bindings []Keybinding) ([]string, []list.Item) {
+	counts := map[string]int{}
+	for _, kb := range bindings {
+		counts[kb.App]++
+	}
+
+	apps := make([]string, 0, len(counts)+1)
+	apps = append(apps, "All")
+	for app := range counts {
+		apps = append(apps, app)
+	}
+	// Sort but keep All first
+	sortedApps := []string{"All"}
+	if len(apps) > 1 {
+		rest := apps[1:]
+		sort.Strings(rest)
+		sortedApps = append(sortedApps, rest...)
+	}
+
+	items := make([]list.Item, 0, len(sortedApps))
+	for _, app := range sortedApps {
+		count := 0
+		if app == "All" {
+			for _, c := range counts {
+				count += c
+			}
+		} else {
+			count = counts[app]
+		}
+		items = append(items, appItem{Name: app, Count: count})
+	}
+
+	return sortedApps, items
+}
+
+func toListItems(bindings []Keybinding) []list.Item {
+	items := make([]list.Item, len(bindings))
+	for i, kb := range bindings {
+		items[i] = kb
+	}
+	return items
+}
+
+// applyFilter refreshes the main list based on selected app
+func (m *model) applyFilter() {
+	filtered := m.keybindings
+	if m.selectedApp != "All" {
+		tmp := []Keybinding{}
+		for _, kb := range m.keybindings {
+			if kb.App == m.selectedApp {
+				tmp = append(tmp, kb)
+			}
+		}
+		filtered = tmp
+	}
+	items := toListItems(filtered)
+	m.main.SetItems(items)
+	m.filteredKeys = filtered
 }
 
 // Custom list item delegate to show app and category
