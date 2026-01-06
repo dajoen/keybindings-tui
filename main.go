@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -181,6 +184,9 @@ func (m model) View() string {
 }
 
 func main() {
+	plain := flag.Bool("plain", false, "print keybindings to stdout and exit")
+	flag.Parse()
+
 	// Parse all keybindings
 	keybindings := []Keybinding{}
 
@@ -194,9 +200,14 @@ func main() {
 	kittyKeys := parseKitty(filepath.Join(homeDir, ".config/kitty/kitty.conf"))
 	keybindings = append(keybindings, kittyKeys...)
 
-	// Parse Neovim
-	nvimKeys := parseNeovim(filepath.Join(homeDir, ".config/nvim/init.lua"))
+	// Parse Neovim - scan all plugin files
+	nvimKeys := parseNeovimAll(filepath.Join(homeDir, ".config/nvim"))
 	keybindings = append(keybindings, nvimKeys...)
+
+	if *plain {
+		printPlain(keybindings)
+		return
+	}
 
 	apps, sidebarItems := buildSidebar(keybindings)
 
@@ -365,89 +376,129 @@ func parseKitty(configPath string) []Keybinding {
 	return bindings
 }
 
-// parseNeovim extracts keybindings from init.lua
-func parseNeovim(configPath string) []Keybinding {
+// parseNeovimAll scans all Neovim config files recursively
+func parseNeovimAll(nvimDir string) []Keybinding {
+	var bindings []Keybinding
+
+	// Detect leader and localleader from init.lua
+	leader, localLeader := detectNvimLeaders(filepath.Join(nvimDir, "init.lua"))
+
+	// Parse main init.lua
+	mainFile := filepath.Join(nvimDir, "init.lua")
+	bindings = append(bindings, parseNeovimFile(mainFile, "Core", leader, localLeader)...)
+
+	// Parse all lua files recursively
+	luaDir := filepath.Join(nvimDir, "lua")
+	filepath.Walk(luaDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() || !strings.HasSuffix(path, ".lua") {
+			return nil
+		}
+
+		// Extract module name from path
+		relPath, _ := filepath.Rel(luaDir, path)
+		module := strings.TrimSuffix(relPath, ".lua")
+		module = strings.ReplaceAll(module, string(filepath.Separator), ".")
+
+		// Clean up module name for display
+		parts := strings.Split(module, ".")
+		if len(parts) > 0 {
+			// Use the last meaningful part or "plugins.X"
+			if len(parts) >= 2 && parts[len(parts)-2] == "plugins" {
+				module = "Plugin: " + strings.Title(parts[len(parts)-1])
+			} else {
+				module = strings.Title(parts[len(parts)-1])
+			}
+		}
+
+		bindings = append(bindings, parseNeovimFile(path, module, leader, localLeader)...)
+		return nil
+	})
+
+	return bindings
+}
+
+// parseNeovimFile extracts keybindings from a single Neovim lua file
+func parseNeovimFile(configPath, module, leader, localLeader string) []Keybinding {
 	var bindings []Keybinding
 
 	data, err := os.ReadFile(configPath)
 	if err != nil {
-		// Try init.vim
-		configPath = strings.Replace(configPath, ".lua", ".vim", 1)
-		data, err = os.ReadFile(configPath)
-		if err != nil {
-			return bindings
-		}
+		return bindings
 	}
 
 	lines := strings.Split(string(data), "\n")
 
-	// Lua format: vim.keymap.set('n', '<leader>ff', ':Telescope find_files<CR>')
-	luaRe := regexp.MustCompile(`vim\.keymap\.set\(['"](.)['"],\s*['"]([^'"]+)['"],\s*['"]([^'"]+)['"]`)
+	// Lua format: vim.keymap.set('n', '<leader>ff', ..., { desc = 'Find files' })
+	// With description capture
+	luaReWithDesc := regexp.MustCompile(`vim\.keymap\.set\(['"](.)['"],\s*['"]([^'"]+)['"],\s*[^,]+,\s*\{[^}]*desc\s*=\s*['"]([^'"]+)['"]`)
 
-	// Vim format: nnoremap <leader>ff :Telescope find_files<CR>
-	vimRe := regexp.MustCompile(`([nvicosx]?noremap|[nvicosx]?map)\s+([^\s]+)\s+(.*)`)
+	// Without description
+	luaRe := regexp.MustCompile(`vim\.keymap\.set\(['"](.)['"],\s*['"]([^'"]+)['"],\s*['"]?([^'"]+)['"]?`)
+
+	// Also look for map() function calls in plugin configs
+	mapRe := regexp.MustCompile(`map\(['"](.)['"],\s*['"]([^'"]+)['"],\s*[^,]+,\s*\{[^}]*desc\s*=\s*['"]([^'"]+)['"]`)
 
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "--") || strings.HasPrefix(line, "\"") {
+		if line == "" || strings.HasPrefix(line, "--") {
 			continue
 		}
 
-		// Try Lua format
-		if matches := luaRe.FindStringSubmatch(line); matches != nil {
-			mode := matches[1]
-			key := matches[2]
-			action := matches[3]
+		var mode, key, desc, action string
+		matched := false
 
-			key = strings.ReplaceAll(key, "<leader>", "Leader+")
-			key = strings.ReplaceAll(key, "<", "")
-			key = strings.ReplaceAll(key, ">", "")
+		// Try with description first
+		if matches := luaReWithDesc.FindStringSubmatch(line); matches != nil {
+			mode = matches[1]
+			key = matches[2]
+			desc = matches[3]
+			matched = true
+		} else if matches := mapRe.FindStringSubmatch(line); matches != nil {
+			mode = matches[1]
+			key = matches[2]
+			desc = matches[3]
+			matched = true
+		} else if matches := luaRe.FindStringSubmatch(line); matches != nil {
+			mode = matches[1]
+			key = matches[2]
+			action = matches[3]
+			matched = true
+		}
+
+		if !matched {
+			continue
+		}
+
+		// Format key using detected leader/localleader and friendly names
+		friendlyKey := formatNeovimKey(key, leader, localLeader)
+
+		// Clean action and try to enrich description from Neovim help if missing
+		if desc == "" {
 			action = strings.ReplaceAll(action, "<CR>", "")
+			action = strings.ReplaceAll(action, "<cr>", "")
 			action = strings.TrimSpace(action)
 
-			desc := humanizeAction(action)
-			bindings = append(bindings, Keybinding{
-				Shortcut: fmt.Sprintf("%s (%s)", key, mode),
-				Action:   action,
-				Desc:     desc,
-				Category: "Editor",
-				App:      "Neovim",
-			})
-			continue
-		}
-
-		// Try Vim format
-		if matches := vimRe.FindStringSubmatch(line); matches != nil {
-			mapType := matches[1]
-			key := matches[2]
-			action := matches[3]
-
-			mode := "n"
-			modes := []string{"n", "v", "i", "c", "o", "x"}
-			if len(mapType) > 0 {
-				for _, m := range modes {
-					if string(mapType[0]) == m {
-						mode = m
-						break
-					}
-				}
+			if d := lookupNvimHelpDescription(action); d != "" {
+				desc = d
+			} else {
+				desc = humanizeAction(action)
 			}
-
-			key = strings.ReplaceAll(key, "<leader>", "Leader+")
-			key = strings.ReplaceAll(key, "<", "")
-			key = strings.ReplaceAll(key, ">", "")
-			action = strings.ReplaceAll(action, "<CR>", "")
-			action = strings.TrimSpace(action)
-
-			desc := humanizeAction(action)
-			bindings = append(bindings, Keybinding{
-				Shortcut: fmt.Sprintf("%s (%s)", key, mode),
-				Action:   action,
-				Desc:     desc,
-				Category: "Editor",
-				App:      "Neovim",
-			})
 		}
+
+		if action == "" && desc != "" {
+			action = "(function)"
+		}
+
+		bindings = append(bindings, Keybinding{
+			Shortcut: fmt.Sprintf("%s (%s)", friendlyKey, displayMode(mode)),
+			Action:   action,
+			Desc:     desc,
+			Category: module,
+			App:      "Neovim",
+		})
 	}
 
 	return bindings
@@ -478,45 +529,371 @@ func humanizeAction(action string) string {
 	action = strings.TrimSpace(action)
 	action = strings.Trim(action, ",")
 
-	humanizations := map[string]string{
-		"$terminal":              "Open terminal",
-		"$fileManager":           "Open file manager",
-		"$menu":                  "Open launcher",
-		"$lock":                  "Lock screen",
-		"hyprlock":               "Lock screen",
-		"killactive":             "Close window",
-		"togglefloating":         "Toggle floating/tiling",
-		"togglesplit":            "Toggle split layout",
-		"togglespecialworkspace": "Toggle special workspace",
-		"movetoworkspace":        "Move to workspace",
-		"workspace":              "Switch to workspace",
-		"movefocus":              "Move focus",
-		"movewindow":             "Move window",
-		"resizewindow":           "Resize window",
-		"pseudo":                 "Pseudo-tiling mode",
-		"hyprshot":               "Take screenshot",
-		"playerctl":              "Media control",
-		"pamixer":                "Volume control",
-		"powermenu":              "Power menu",
-		"exit":                   "Exit Hyprland",
+	// Remove common exec prefixes and surrounding quotes
+	action = strings.TrimPrefix(action, "exec ")
+	action = strings.TrimPrefix(action, "exec,")
+	action = strings.TrimSpace(action)
+	action = strings.Trim(action, "\"'")
+
+	// Collapse excessive spacing
+	fields := strings.Fields(action)
+	action = strings.Join(fields, " ")
+
+	if len(action) == 0 {
+		return "(command)"
 	}
 
-	for keyword, description := range humanizations {
-		if strings.Contains(action, keyword) {
-			param := strings.ReplaceAll(action, keyword, "")
-			param = strings.Trim(param, ", \"'")
-			if param != "" && !strings.HasPrefix(param, "-") {
-				return fmt.Sprintf("%s (%s)", description, param)
-			}
-			return description
-		}
-	}
-
-	if len(action) > 60 {
-		return action[:57] + "..."
+	if len(action) > 80 {
+		return action[:77] + "..."
 	}
 
 	return action
+}
+
+// detectNvimLeaders reads init.lua to find leader and localleader values
+func detectNvimLeaders(initPath string) (string, string) {
+	data, err := os.ReadFile(initPath)
+	if err != nil {
+		return "Leader", "LocalLeader"
+	}
+
+	leader := "Leader"
+	localLeader := "LocalLeader"
+
+	leaderRe := regexp.MustCompile(`vim\.g\.mapleader\s*=\s*['\"]([^'\"]+)['\"]`)
+	localLeaderRe := regexp.MustCompile(`vim\.g\.maplocalleader\s*=\s*['\"]([^'\"]+)['\"]`)
+
+	if m := leaderRe.FindStringSubmatch(string(data)); m != nil {
+		leader = displayNameForLeaderChar(m[1])
+	}
+	if m := localLeaderRe.FindStringSubmatch(string(data)); m != nil {
+		localLeader = displayNameForLeaderChar(m[1])
+	}
+	return leader, localLeader
+}
+
+// displayNameForLeaderChar converts a single-character leader into a word
+func displayNameForLeaderChar(s string) string {
+	if s == "" {
+		return "Leader"
+	}
+	switch s {
+	case " ":
+		return "Space"
+	case ",":
+		return "Comma"
+	case ";":
+		return "Semicolon"
+	case "/":
+		return "Slash"
+	case "\\":
+		return "Backslash"
+	case ".":
+		return "Period"
+	case "-":
+		return "Minus"
+	case "_":
+		return "Underscore"
+	case "=":
+		return "Equals"
+	default:
+		return s
+	}
+}
+
+// displayMode gives friendly names for Neovim modes
+func displayMode(m string) string {
+	switch m {
+	case "n":
+		return "Normal"
+	case "v":
+		return "Visual"
+	case "x":
+		return "Visual-Block"
+	case "i":
+		return "Insert"
+	case "o":
+		return "Operator"
+	case "c":
+		return "Command"
+	case "t":
+		return "Terminal"
+	case "s":
+		return "Select"
+	default:
+		return m
+	}
+}
+
+// formatNeovimKey converts a Neovim key string to a beginner-friendly form
+func formatNeovimKey(key, leader, localLeader string) string {
+	tokens := tokenizeNeovimKey(key, leader, localLeader)
+
+	// If a single token remains, decide whether to expand or keep as-is
+	if len(tokens) == 1 {
+		t := prettifyToken(tokens[0])
+		if strings.HasPrefix(t, "<") && strings.HasSuffix(t, ">") {
+			return t
+		}
+		if isSpecialWord(t) {
+			return t
+		}
+		if len([]rune(t)) > 1 {
+			parts := make([]string, 0, len([]rune(t)))
+			for _, r := range t {
+				parts = append(parts, string(r))
+			}
+			return strings.Join(parts, " + ")
+		}
+		return t
+	}
+
+	for i, t := range tokens {
+		tokens[i] = prettifyToken(t)
+	}
+	return strings.Join(tokens, " + ")
+}
+
+// tokenizeNeovimKey breaks a key string into meaningful tokens to avoid splitting
+// words like Escape/Space while still expanding compact motions like "gd".
+func tokenizeNeovimKey(key, leader, localLeader string) []string {
+	if leader != "" {
+		key = strings.ReplaceAll(key, "<leader>", leaderDisplayToToken(leader))
+	}
+	if localLeader != "" {
+		key = strings.ReplaceAll(key, "<localleader>", leaderDisplayToToken(localLeader))
+	}
+
+	// Special replacements remain as angle tokens so we can keep them intact
+	specialReplace := map[string]string{
+		"<CR>":    "<ENTER>",
+		"<cr>":    "<ENTER>",
+		"<Esc>":   "<ESC>",
+		"<Tab>":   "<TAB>",
+		"<BS>":    "<BACKSPACE>",
+		"<Space>": "<SPACE>",
+		"<space>": "<SPACE>",
+	}
+	for k, v := range specialReplace {
+		key = strings.ReplaceAll(key, k, v)
+	}
+
+	tokens := []string{}
+	tokenRe := regexp.MustCompile(`<[^>]+>|\S+`)
+	modRe := regexp.MustCompile(`^<([CASMcasm])-([A-Za-z0-9]+)>$`)
+
+	for _, tok := range tokenRe.FindAllString(key, -1) {
+		// Modifier tokens expand to two tokens: Ctrl + n
+		if m := modRe.FindStringSubmatch(tok); m != nil {
+			mod := strings.ToUpper(m[1])
+			var modName string
+			switch mod {
+			case "C":
+				modName = "Ctrl"
+			case "A":
+				modName = "Alt"
+			case "S":
+				modName = "Shift"
+			case "M":
+				modName = "Meta"
+			default:
+				modName = m[1]
+			}
+			tokens = append(tokens, modName, m[2])
+			continue
+		}
+		tokens = append(tokens, tok)
+	}
+
+	return tokens
+}
+
+// prettifyToken keeps angle tokens or special words readable
+func prettifyToken(t string) string {
+	if strings.HasPrefix(t, "<") && strings.HasSuffix(t, ">") {
+		return strings.ToUpper(t)
+	}
+	switch strings.ToLower(t) {
+	case "space":
+		return "Space"
+	case "enter":
+		return "Enter"
+	case "escape":
+		return "Escape"
+	case "tab":
+		return "Tab"
+	case "backspace":
+		return "Backspace"
+	default:
+		return t
+	}
+}
+
+// isSpecialWord prevents splitting of words like Space, Enter, Escape, Tab, Backspace
+func isSpecialWord(s string) bool {
+	switch strings.ToLower(s) {
+	case "space", "enter", "escape", "tab", "backspace":
+		return true
+	default:
+		return false
+	}
+}
+
+// leaderDisplayToToken converts leader display into an angle-bracket token
+func leaderDisplayToToken(s string) string {
+	switch s {
+	case "Space":
+		return "<SPACE>"
+	case "Comma":
+		return "<,>"
+	case "Semicolon":
+		return "<;>"
+	case "Slash":
+		return "</>"
+	case "Backslash":
+		return "<\\>"
+	case "Period":
+		return "<.>"
+	case "Minus":
+		return "<->"
+	case "Underscore":
+		return "<_>"
+	case "Equals":
+		return "<=>"
+	default:
+		// Fallback: wrap in angle brackets, uppercased when single char alpha
+		if len([]rune(s)) == 1 {
+			return "<" + strings.ToUpper(s) + ">"
+		}
+		return "<" + s + ">"
+	}
+}
+
+// ----- Neovim help integration -----
+
+var helpCache = map[string]string{}
+
+// lookupNvimHelpDescription tries to derive a topic from the action and fetch
+// the first meaningful line(s) from Neovim help. Results are cached.
+func lookupNvimHelpDescription(action string) string {
+	action = strings.TrimSpace(action)
+	if action == "" || action == "(function)" {
+		return ""
+	}
+
+	topics := deriveHelpTopics(action)
+	for _, t := range topics {
+		if t == "" {
+			continue
+		}
+		if desc, ok := helpCache[t]; ok {
+			if desc != "" {
+				return desc
+			}
+			continue
+		}
+		if d := fetchNvimHelpTopic(t); d != "" {
+			helpCache[t] = d
+			return d
+		}
+		helpCache[t] = ""
+	}
+	return ""
+}
+
+// deriveHelpTopics extracts likely help topics from a command/action string.
+// Examples:
+//   - ":w"              => [":w", "write"]
+//   - ":Telescope find_files" => [":Telescope", "telescope"]
+//   - "gitsigns.stage_hunk"   => ["gitsigns", "gitsigns.nvim"]
+func deriveHelpTopics(action string) []string {
+	var topics []string
+	s := strings.TrimSpace(action)
+
+	// If action begins with ':' treat first token as Ex-command topic
+	if strings.HasPrefix(s, ":") {
+		first := strings.Fields(s)
+		if len(first) > 0 {
+			cmd := first[0]
+			topics = append(topics, cmd)
+			// Also lowercase variant without ':' for some docs
+			topics = append(topics, strings.TrimPrefix(strings.ToLower(cmd), ":"))
+		}
+	}
+
+	// If it looks like module.fn, try module docs
+	if dot := strings.Index(s, "."); dot > 0 {
+		mod := s[:dot]
+		topics = append(topics, mod)
+		topics = append(topics, mod+".nvim")
+		topics = append(topics, mod+".txt")
+	}
+
+	// If nothing yet, fall back to first word
+	if len(topics) == 0 {
+		w := strings.Fields(s)
+		if len(w) > 0 {
+			topics = append(topics, w[0])
+		}
+	}
+	// Deduplicate while preserving order
+	seen := map[string]bool{}
+	out := make([]string, 0, len(topics))
+	for _, t := range topics {
+		if !seen[t] {
+			seen[t] = true
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// fetchNvimHelpTopic runs Neovim headless to print the first lines of a help topic.
+// Returns a short, single-line description.
+func fetchNvimHelpTopic(topic string) string {
+	// Construct a headless Neovim command sequence:
+	//   :help {topic} | silent only | 1,30p | qall!
+	// This prints first ~30 lines of the help buffer to stdout in ex-mode.
+	args := []string{"-es", "--headless",
+		"+silent helptags ALL",
+		"+silent help " + topic,
+		"+silent only",
+		"+silent 1,30p",
+		"+qall!",
+	}
+
+	cmd := exec.Command("nvim", args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return ""
+	}
+
+	text := stdout.String()
+	// Extract the first non-empty, non-tag line that looks like a summary
+	lines := strings.Split(text, "\n")
+	for _, ln := range lines {
+		l := strings.TrimSpace(ln)
+		if l == "" {
+			continue
+		}
+		// Skip header delineations or tag anchors like *telescope*
+		if strings.HasPrefix(l, "*") && strings.HasSuffix(l, "*") {
+			continue
+		}
+		// Avoid section headers like "CONTENTS" or all-caps
+		if l == strings.ToUpper(l) && len(l) > 3 {
+			continue
+		}
+		// Return a concise line
+		// Truncate if very long
+		if len(l) > 140 {
+			l = l[:137] + "..."
+		}
+		return l
+	}
+	return ""
 }
 
 func categorizeBinding(key, action string) string {
@@ -665,6 +1042,24 @@ func toListItems(bindings []Keybinding) []list.Item {
 		items[i] = kb
 	}
 	return items
+}
+
+// printPlain outputs keybindings as plain text rows
+func printPlain(bindings []Keybinding) {
+	// Stable ordering: by App, then Category, then Shortcut
+	sort.Slice(bindings, func(i, j int) bool {
+		if bindings[i].App != bindings[j].App {
+			return bindings[i].App < bindings[j].App
+		}
+		if bindings[i].Category != bindings[j].Category {
+			return bindings[i].Category < bindings[j].Category
+		}
+		return bindings[i].Shortcut < bindings[j].Shortcut
+	})
+
+	for _, kb := range bindings {
+		fmt.Printf("%s\t%s\t%s\t%s\t%s\n", kb.App, kb.Category, kb.Shortcut, kb.Desc, kb.Action)
+	}
 }
 
 // applyFilter refreshes the main list based on selected app
