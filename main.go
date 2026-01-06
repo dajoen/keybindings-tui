@@ -771,7 +771,10 @@ func leaderDisplayToToken(s string) string {
 
 // ----- Neovim help integration -----
 
-var helpCache = map[string]string{}
+var (
+	helpCache      = map[string]string{}
+	fetchHelpTopic = fetchNvimHelpTopic
+)
 
 // lookupNvimHelpDescription tries to derive a topic from the action and fetch
 // the first meaningful line(s) from Neovim help. Results are cached.
@@ -792,7 +795,7 @@ func lookupNvimHelpDescription(action string) string {
 			}
 			continue
 		}
-		if d := fetchNvimHelpTopic(t); d != "" {
+		if d := fetchHelpTopic(t); d != "" {
 			helpCache[t] = d
 			return d
 		}
@@ -870,7 +873,10 @@ func fetchNvimHelpTopic(topic string) string {
 		return ""
 	}
 
-	text := stdout.String()
+	return parseHelpOutput(stdout.String())
+}
+
+func parseHelpOutput(text string) string {
 	// Extract the first non-empty, non-tag line that looks like a summary
 	lines := strings.Split(text, "\n")
 	for _, ln := range lines {

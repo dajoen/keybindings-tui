@@ -27,15 +27,40 @@ Or build from source:
 ```bash
 git clone https://github.com/dajoen/keybindings-tui.git
 cd keybindings-tui
-go build -o keybindings-tui
+go build -o bin/keybindings-tui
 ```
 
 ### Make targets
 
+- `make build` – compile `bin/keybindings-tui`
 - `make install` – build and copy to `~/.local/bin`
 - `make install-go` – use `go install` to place the binary in your Go bin (typically `~/go/bin` or `$GOBIN`)
+- `make test-local-cache` – run tests using a repo-local Go build cache at `.gocache`
+- `make setup` – install pre-commit hooks
 
 Ensure your PATH includes either `~/.local/bin` or your Go bin (e.g. add `export PATH="$HOME/.local/bin:$PATH"` or `export PATH="$HOME/go/bin:$PATH"`).
+
+### Pre-commit
+
+Install hooks after cloning:
+
+```bash
+pre-commit install
+```
+
+## Development
+
+Quick setup:
+
+```bash
+make setup
+```
+
+Common workflow:
+
+- `make build` to compile the binary locally
+- `make test-local-cache` to run tests with a repo-local Go cache
+- `go run .` to run the TUI during development
 
 ## Usage
 
