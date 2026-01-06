@@ -30,6 +30,13 @@ cd keybindings-tui
 go build -o keybindings-tui
 ```
 
+### Make targets
+
+- `make install` – build and copy to `~/.local/bin`
+- `make install-go` – use `go install` to place the binary in your Go bin (typically `~/go/bin` or `$GOBIN`)
+
+Ensure your PATH includes either `~/.local/bin` or your Go bin (e.g. add `export PATH="$HOME/.local/bin:$PATH"` or `export PATH="$HOME/go/bin:$PATH"`).
+
 ## Usage
 
 Simply run the command:
