@@ -110,15 +110,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		sidebarWidth := 26
-		contentWidth := msg.Width - sidebarWidth - 4
-		if contentWidth < 30 {
-			contentWidth = 30
+		sidebarWidth := 24
+		if msg.Width < 70 {
+			sidebarWidth = 18
+		} else if msg.Width > 110 {
+			sidebarWidth = 28
 		}
+		contentWidth := msg.Width - sidebarWidth - 4
+		if contentWidth < 24 {
+			// squeeze sidebar if terminal is very narrow
+			sidebarWidth = 14
+			contentWidth = msg.Width - sidebarWidth - 4
+			if contentWidth < 20 {
+				contentWidth = 20
+			}
+		}
+
+		listHeight := msg.Height - 4
+		if listHeight < 5 {
+			listHeight = 5
+		}
+
 		m.sidebar.SetWidth(sidebarWidth)
-		m.sidebar.SetHeight(msg.Height - 4)
+		m.sidebar.SetHeight(listHeight)
 		m.main.SetWidth(contentWidth)
-		m.main.SetHeight(msg.Height - 4)
+		m.main.SetHeight(listHeight)
 		return m, nil
 
 	case tea.KeyMsg:
@@ -557,15 +573,36 @@ func (d rowDelegate) Render(w io.Writer, m list.Model, index int, listItem list.
 	if width <= 0 {
 		width = 80
 	}
+	// Account for two separators (3 chars each)
+	sepWidth := 6
+	avail := width - sepWidth
+	if avail < 30 {
+		avail = width
+	}
 
-	colShortcut := 18
-	colDesc := width - colShortcut - 18
+	colShortcut := int(float64(avail) * 0.22)
+	if colShortcut < 12 {
+		colShortcut = 12
+	}
+
+	colDesc := int(float64(avail) * 0.45)
 	if colDesc < 24 {
 		colDesc = 24
 	}
-	colCmd := width - colShortcut - colDesc - 6
-	if colCmd < 12 {
-		colCmd = 12
+
+	colCmd := avail - colShortcut - colDesc
+	if colCmd < 14 {
+		deficit := 14 - colCmd
+		colCmd = 14
+		// Steal from desc first
+		if colDesc-deficit > 18 {
+			colDesc -= deficit
+		} else {
+			colShortcut -= deficit
+			if colShortcut < 10 {
+				colShortcut = 10
+			}
+		}
 	}
 
 	sep := lipgloss.NewStyle().Foreground(lipgloss.Color("#44475A")).Render(" │ ")
